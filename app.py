@@ -10,68 +10,82 @@ import google.generativeai as genai
 st.set_page_config(page_title="PhysioTracker", layout="wide")
 
 # --- CONNECT TO GOOGLE SHEETS ---
-def get_data():
+def get_client():
+    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+    creds_dict = dict(st.secrets["gcp_service_account"])
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    client = gspread.authorize(creds)
+    return client
+
+def get_log_sheet(client):
     try:
-        scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-        # Load credentials from Streamlit Secrets
-        creds_dict = dict(st.secrets["gcp_service_account"])
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        client = gspread.authorize(creds)
-        # Open the sheet
-        sheet = client.open("physio_logs").sheet1
-        return sheet
-    except Exception as e:
-        st.error(f"Connection Error: {e}")
+        return client.open("physio_logs").sheet1
+    except:
         return None
 
-sheet = get_data()
+def get_goal_sheet(client):
+    try:
+        sh = client.open("physio_logs")
+        try:
+            return sh.worksheet("goals")
+        except:
+            ws = sh.add_worksheet(title="goals", rows=10, cols=5)
+            ws.append_row(["Target Distance (km)", "Max Pain Level", "Target Date"])
+            ws.append_row([10.0, 2, "2026-12-31"])
+            return ws
+    except:
+        return None
 
-# --- CONFIGURE GEMINI AI ---
-# We wrap this in a try block so the app doesn't crash if the key is missing
+client = get_client()
+sheet = get_log_sheet(client)
+goal_sheet = get_goal_sheet(client)
+
+# --- GEMINI AI ---
 try:
     genai.configure(api_key=st.secrets["gemini_api_key"])
     ai_available = True
 except:
     ai_available = False
 
-# --- LOAD & CLEAN DATA ---
+# --- LOAD DATA ---
+df = pd.DataFrame()
 if sheet:
     raw_data = sheet.get_all_records()
     df = pd.DataFrame(raw_data)
-    
     if not df.empty:
-        # 1. Cleanup "User" column if it exists from previous tests
-        if "User" in df.columns:
-            df = df.drop(columns=["User"])
-
-        # 2. Clean Numeric Columns (Convert text to 0)
+        if "User" in df.columns: df = df.drop(columns=["User"])
+        
+        # Clean Data
         df["Duration (min)"] = pd.to_numeric(df["Duration (min)"], errors='coerce').fillna(0)
         df["Pain Level (0-10)"] = pd.to_numeric(df["Pain Level (0-10)"], errors='coerce').fillna(0)
         df["Distance (km)"] = pd.to_numeric(df["Distance (km)"], errors='coerce').fillna(0.0)
-        
-        # 3. Handle Weight Column (Create it if it doesn't exist)
-        if "Weight (kg)" not in df.columns:
-            df["Weight (kg)"] = 0.0
-        else:
-            df["Weight (kg)"] = pd.to_numeric(df["Weight (kg)"], errors='coerce')
-            
-        # 4. Fix Dates
+        if "Weight (kg)" not in df.columns: df["Weight (kg)"] = 0.0
+        else: df["Weight (kg)"] = pd.to_numeric(df["Weight (kg)"], errors='coerce')
         df["Date"] = pd.to_datetime(df["Date"])
-    else:
-        df = pd.DataFrame()
-else:
-    df = pd.DataFrame()
 
-# --- SIDEBAR: LOGGING ---
+# --- LOAD GOALS ---
+target_dist = 10.0
+target_pain = 2
+target_date = date(2026, 12, 31)
+
+if goal_sheet:
+    goal_data = goal_sheet.get_all_records()
+    if goal_data:
+        last_goal = goal_data[-1]
+        target_dist = float(last_goal.get("Target Distance (km)", 10.0))
+        target_pain = int(last_goal.get("Max Pain Level", 2))
+        try:
+            target_date = datetime.strptime(last_goal.get("Target Date", "2026-12-31"), "%Y-%m-%d").date()
+        except:
+            pass
+
+# --- SIDEBAR ---
 with st.sidebar:
     st.header("📝 New Entry")
-    
     log_type = st.radio("Log Type", ["Activity", "Pain Check-in", "Body Weight"])
     
     with st.form("entry_form"):
         date_val = st.date_input("Date", datetime.today())
-        
-        # Initialize default variables
         activity_type = ""
         context = ""
         distance = 0.0
@@ -81,62 +95,43 @@ with st.sidebar:
         pain_level = 0
         weight_val = 0.0
         
-        # 1. Activity Inputs
         if log_type == "Activity":
             activity_type = st.selectbox("Type", ["Running", "Cycling", "Weights", "Yoga", "Other"])
-            
             if activity_type in ["Running", "Cycling"]:
                 context = st.selectbox("Context", ["Outdoor", "Treadmill", "Track", "Trail"])
                 distance = st.number_input("Dist (km)", min_value=0.0, step=0.1)
             elif activity_type == "Weights":
                 context = "Gym/Weights"
-                st.caption("ℹ️ Add weight details in Notes below.")
-            
             duration = st.number_input("Mins", min_value=0, step=5)
             intensity = st.slider("Intensity (1-10)", 1, 10, 5)
             
-        # 2. Pain Inputs
         if log_type == "Pain Check-in":
             st.markdown("### 🩺 Symptom Check")
             pain_loc = st.selectbox("Loc", ["Lower Back", "Knee", "Neck", "General"])
             pain_level = st.slider("Pain (0-10)", 0, 10, 0)
             activity_type = "Symptom Log"
             
-        # 3. Weight Inputs
         if log_type == "Body Weight":
             st.markdown("### ⚖️ Weight")
             weight_val = st.number_input("Kg", min_value=0.0, step=0.1, format="%.1f")
             activity_type = "Weight Log"
 
-        notes = st.text_area("Notes", placeholder="Details...")
-        
+        notes = st.text_area("Notes")
         submitted = st.form_submit_button("Save Entry")
         
         if submitted and sheet:
-            # Map inputs to columns
-            new_row = [
-                str(date_val), 
-                activity_type, 
-                context, 
-                distance, 
-                duration, 
-                intensity if log_type == "Activity" else "", 
-                pain_loc, 
-                pain_level if log_type == "Pain Check-in" else "",
-                notes,
-                weight_val if log_type == "Body Weight" else ""
-            ]
+            new_row = [str(date_val), activity_type, context, distance, duration, intensity if log_type == "Activity" else "", pain_loc, pain_level if log_type == "Pain Check-in" else "", notes, weight_val if log_type == "Body Weight" else ""]
             sheet.append_row(new_row)
             st.success("Saved!")
             st.rerun()
 
-# --- MAIN DASHBOARD ---
+# --- DASHBOARD ---
 st.title("🏃 PhysioTracker")
 
 if df.empty:
     st.info("Start by adding an entry in the sidebar.")
 else:
-    # Aggregated Data for Charts
+    # 1. Daily Stats
     daily_stats = df.groupby(df["Date"].dt.date).agg({
         "Duration (min)": "sum",
         "Distance (km)": "sum",
@@ -145,131 +140,110 @@ else:
     }).reset_index()
     daily_stats["Date"] = pd.to_datetime(daily_stats["Date"])
 
-    # TABS
-    tab1, tab2, tab3 = st.tabs(["📅 Daily Log", "🏆 Weekly Progress", "🤖 AI Analyst"])
+    # 2. ADVANCED LOGIC: The "48-Hour Safety Window"
+    # We need to know if a run caused pain TODAY, TOMORROW, or the NEXT DAY.
+    
+    # Create a simple lookup dictionary: { Date -> Max Pain that day }
+    pain_map = daily_stats.set_index("Date")["Pain Level (0-10)"].to_dict()
+    
+    # We will verify every run
+    valid_runs = []
+    
+    # Filter only running rows
+    running_logs = df[(df["Activity Type"] == "Running") & (df["Distance (km)"] > 0)].copy()
+    
+    for index, row in running_logs.iterrows():
+        run_date = row["Date"]
+        dist = row["Distance (km)"]
+        
+        # Check Day 0 (Run Day), Day 1 (Next Day), Day 2 (Day After)
+        # We use .get(date, 0) so if future dates don't exist yet, we assume 0 pain (benefit of doubt)
+        p0 = pain_map.get(run_date, 0)
+        p1 = pain_map.get(run_date + timedelta(days=1), 0)
+        p2 = pain_map.get(run_date + timedelta(days=2), 0)
+        
+        # The strict rule: ALL three days must be <= Target Pain
+        if p0 <= target_pain and p1 <= target_pain and p2 <= target_pain:
+            valid_runs.append(dist)
+            
+    # Get the best valid run
+    current_best_run = max(valid_runs) if valid_runs else 0.0
 
-    # --- TAB 1: DAILY VIEW ---
+    # --- TABS ---
+    tab1, tab2, tab3 = st.tabs(["📅 Daily Log", "🏆 Progress & Goals", "🤖 AI Analyst"])
+
     with tab1:
         st.subheader("Last 10 Days Activity")
         last_10 = daily_stats.sort_values("Date").tail(10)
-        
         fig = go.Figure()
         fig.add_trace(go.Bar(x=last_10["Date"], y=last_10["Duration (min)"], name="Mins", marker_color='rgb(55, 83, 109)'))
         fig.add_trace(go.Scatter(x=last_10["Date"], y=last_10["Pain Level (0-10)"], name="Pain", yaxis="y2", mode='lines+markers', line=dict(color='red', width=3)))
-        
-        fig.update_layout(
-            yaxis=dict(title="Mins"), 
-            yaxis2=dict(title="Pain", overlaying="y", side="right", range=[0, 10]), 
-            legend=dict(orientation="h", y=1.1)
-        )
+        fig.update_layout(yaxis=dict(title="Mins"), yaxis2=dict(title="Pain", overlaying="y", side="right", range=[0, 10]), legend=dict(orientation="h", y=1.1))
         st.plotly_chart(fig, use_container_width=True)
-        
-        st.markdown("### Recent Log Entries")
-        # Display raw dataframe sorted by date
-        cols = [c for c in ["Date", "Activity Type", "Distance (km)", "Duration (min)", "Pain Level (0-10)", "Weight (kg)", "Notes"] if c in df.columns]
-        st.dataframe(df[cols].sort_values("Date", ascending=False), use_container_width=True, hide_index=True)
+        st.dataframe(df.sort_values("Date", ascending=False), use_container_width=True, hide_index=True)
 
-    # --- TAB 2: PROGRESS & GOALS ---
     with tab2:
-        # 1. Goal Tracker
-        st.markdown("### 🎯 2026 Goal: 10km (Pain ≤ 2)")
-        pain_free = daily_stats[daily_stats["Pain Level (0-10)"] <= 2]
-        best_run = pain_free["Distance (km)"].max() if not pain_free.empty else 0.0
+        with st.expander("⚙️ Edit Goal Settings"):
+            with st.form("goal_form"):
+                st.write("Set your main target:")
+                new_dist = st.number_input("Target Distance (km)", value=target_dist, step=0.5)
+                new_pain = st.number_input("Max Allowed Pain (0-10)", value=int(target_pain), min_value=0, max_value=10)
+                new_date = st.date_input("Target Date", value=target_date)
+                if st.form_submit_button("Update Goal"):
+                    if goal_sheet:
+                        goal_sheet.append_row([new_dist, new_pain, str(new_date)])
+                        st.success("Updated! Refreshing...")
+                        st.rerun()
+
+        days_left = (target_date - date.today()).days
+        progress_pct = min(current_best_run / target_dist, 1.0)
         
-        # Calculate goal stats
-        target = 10.0
-        days_left = (date(2026, 12, 31) - date.today()).days
+        st.markdown(f"### 🎯 Goal: Run {target_dist}km (Pain ≤ {target_pain})")
         
-        c1, c2, c3 = st.columns([2,1,1])
-        with c1: 
-            st.progress(min(best_run / target, 1.0))
-            st.write(f"**Best Pain-Free Run:** {best_run} km")
-        with c2: st.metric("Target", f"{target} km")
+        c1, c2, c3 = st.columns([3, 1, 1])
+        with c1:
+            st.progress(progress_pct)
+            st.caption(f"Best Valid Run: **{current_best_run} km** (No pain spike for 48hrs after)")
+        with c2: st.metric("Target", f"{target_dist} km")
         with c3: st.metric("Deadline", f"{days_left} Days")
         
-        st.divider()
-        
-        # 2. Weekly Summary
-        st.subheader("📊 Weekly Trends")
-        weekly = daily_stats.set_index("Date").resample('W-MON').agg({
-            "Duration (min)": "sum", 
-            "Distance (km)": "sum", 
-            "Pain Level (0-10)": "mean", 
-            "Weight (kg)": "mean"
-        }).reset_index()
-        
-        if not weekly.empty:
-            # Chart: Volume vs Pain
-            fig_w = go.Figure()
-            fig_w.add_trace(go.Scatter(x=weekly["Date"], y=weekly["Distance (km)"], fill='tozeroy', name='Vol (km)'))
-            fig_w.add_trace(go.Scatter(x=weekly["Date"], y=weekly["Pain Level (0-10)"], mode='lines+markers', name='Avg Pain', line=dict(color='red', width=3)))
-            fig_w.update_layout(title="Volume vs Pain", hovermode="x unified", legend=dict(orientation="h", y=1.1))
-            st.plotly_chart(fig_w, use_container_width=True)
+        if current_best_run >= target_dist:
+            st.balloons()
+            st.success("🏆 GOAL ACHIEVED! You ran the distance without a delayed flare-up!")
             
-            # Chart: Weight (if data exists)
-            w_data = weekly[weekly["Weight (kg)"] > 0]
-            if not w_data.empty:
-                fig_weight = go.Figure()
-                fig_weight.add_trace(go.Scatter(x=w_data["Date"], y=w_data["Weight (kg)"], mode='lines+markers', name='Weight', line=dict(color='green', dash='dot')))
-                fig_weight.update_layout(title="Weight Trend", height=300)
-                st.plotly_chart(fig_weight, use_container_width=True)
+        st.divider()
+        st.subheader("📊 Weekly Volume")
+        weekly = daily_stats.set_index("Date").resample('W-MON').agg({"Duration (min)": "sum", "Distance (km)": "sum", "Pain Level (0-10)": "mean", "Weight (kg)": "mean"}).reset_index()
+        fig_w = go.Figure()
+        fig_w.add_trace(go.Scatter(x=weekly["Date"], y=weekly["Distance (km)"], fill='tozeroy', name='Vol (km)'))
+        fig_w.add_trace(go.Scatter(x=weekly["Date"], y=weekly["Pain Level (0-10)"], mode='lines+markers', name='Avg Pain', line=dict(color='red', width=3)))
+        st.plotly_chart(fig_w, use_container_width=True)
 
-    # --- TAB 3: AI ANALYST (UPDATED WITH DEBUGGER) ---
     with tab3:
         st.subheader("🤖 Physio Intelligence")
-        
         if not ai_available:
-            st.warning("⚠️ Gemini API Key not found. Add `gemini_api_key` to your Streamlit Secrets.")
+            st.warning("⚠️ Gemini API Key missing.")
         else:
-            # --- DEBUGGER BLOCK ---
-            with st.expander("🛠️ Debug: See Available Models (Click here if AI fails)"):
-                try:
-                    st.write("Checking models available to your API key...")
-                    model_list = []
-                    for m in genai.list_models():
-                        if 'generateContent' in m.supported_generation_methods:
-                            model_list.append(m.name)
-                            st.code(m.name)
-                    if not model_list:
-                        st.error("No valid models found. Check your API key permissions.")
-                except Exception as e:
-                    st.error(f"Error listing models: {e}")
-            # ----------------------
-
-            st.write("I will analyze your recent logs to find triggers and patterns.")
-            
             if st.button("Generate Insights"):
-                with st.spinner("Analyzing your data..."):
+                with st.spinner("Analyzing delayed responses..."):
                     try:
-                        # 1. Prepare Data (Last 30 days)
                         recent_data = df.sort_values("Date").tail(30).to_csv(index=False)
-                        
-                        # 2. The Prompt
                         prompt = f"""
-                        Act as an expert physiotherapist and data scientist. 
-                        Analyze the following health logs (last 30 days) for a patient with back pain.
+                        Act as an expert physiotherapist. Analyze logs (last 30 days) for a patient with DELAYED ONSET back pain.
                         
-                        Columns: Date, Activity, Context, Distance, Duration, Intensity, Pain Location, Pain Level, Notes, Weight.
+                        GOAL: Run {target_dist}km with Pain <= {target_pain} (Maintaining low pain for 48 hours post-run).
+                        CURRENT BEST: {current_best_run}km.
                         
                         DATA:
                         {recent_data}
                         
-                        YOUR TASK:
-                        1. Identify triggers: Look for correlations between specific activities (e.g. Treadmill vs Outdoor) and pain spikes 24-48 hours later.
-                        2. Spot progress: Are they running further? Is pain decreasing?
-                        3. Give 1 specific recommendation for next week.
-                        
-                        Keep it concise, encouraging, and use bullet points.
+                        TASK:
+                        1. Look for DELAYED patterns: Do runs cause pain spikes 1-2 days later?
+                        2. Progress Check: Are they safely increasing distance?
+                        3. Recommendation: Specific plan for next week.
                         """
-                        
-                        # 3. Call Gemini
-                        # NOTE: If this fails, check the Debug list above and replace this name!
                         model = genai.GenerativeModel('gemini-flash-latest')
                         response = model.generate_content(prompt)
-                        
-                        # 4. Display Result
                         st.markdown(response.text)
-                        
                     except Exception as e:
                         st.error(f"AI Error: {e}")
-                        st.info("💡 Tip: Open the 'Debug' section above to see which model names are valid for your key.")
