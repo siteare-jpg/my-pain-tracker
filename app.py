@@ -264,7 +264,7 @@ else:
                         
                         # 3. Call Gemini
                         # NOTE: If this fails, check the Debug list above and replace this name!
-                        model = genai.GenerativeModel('gemini-2.0-flash')
+                        model = genai.GenerativeModel('gemini-flash-latest')
                         response = model.generate_content(prompt)
                         
                         # 4. Display Result
