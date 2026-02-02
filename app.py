@@ -5,9 +5,37 @@ from datetime import datetime, date, timedelta
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import google.generativeai as genai
+import streamlit_authenticator as stauth
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Pain Recovery Analyst", page_icon="📈", layout="wide")
+st.set_page_config(page_title="BackTrack", page_icon="🛡️", layout="wide")
+
+# --- AUTHENTICATION SETUP ---
+users = st.secrets["credentials"]["usernames"]
+names = st.secrets["credentials"]["names"]
+passwords = st.secrets["credentials"]["passwords"]
+
+authenticator = stauth.Authenticate(
+    dict(zip(users, zip(names, passwords))),
+    "backtrack_cookie",
+    "abcdef",
+    30
+)
+
+name, authentication_status, username = authenticator.login("Login", "main")
+
+if authentication_status == False:
+    st.error("Username/password is incorrect")
+    st.stop()
+elif authentication_status == None:
+    st.warning("Please enter your username and password")
+    st.stop()
+
+# --- SIDEBAR LOGOUT ---
+with st.sidebar:
+    st.title(f"👤 {name}")
+    authenticator.logout("Logout", "sidebar")
+    st.divider()
 
 # --- CONNECT TO GOOGLE SHEETS ---
 def get_client():
@@ -29,9 +57,9 @@ def get_goal_sheet(client):
         try:
             return sh.worksheet("goals")
         except:
-            ws = sh.add_worksheet(title="goals", rows=10, cols=5)
-            ws.append_row(["Target Distance (km)", "Max Pain Level", "Target Date"])
-            ws.append_row([10.0, 2, "2026-12-31"])
+            # UPDATED: Added "Activity Type" to headers
+            ws = sh.add_worksheet(title="goals", rows=10, cols=6)
+            ws.append_row(["User", "Target Distance (km)", "Max Pain Level", "Target Date", "Activity Type"]) 
             return ws
     except:
         return None
@@ -47,39 +75,48 @@ try:
 except:
     ai_available = False
 
-# --- LOAD DATA ---
+# --- LOAD & FILTER DATA ---
 df = pd.DataFrame()
 if sheet:
     raw_data = sheet.get_all_records()
-    df = pd.DataFrame(raw_data)
-    if not df.empty:
-        if "User" in df.columns: df = df.drop(columns=["User"])
+    df_all = pd.DataFrame(raw_data)
+    
+    if not df_all.empty:
+        df_all["Duration (min)"] = pd.to_numeric(df_all["Duration (min)"], errors='coerce').fillna(0)
+        df_all["Pain Level (0-10)"] = pd.to_numeric(df_all["Pain Level (0-10)"], errors='coerce').fillna(0)
+        df_all["Distance (km)"] = pd.to_numeric(df_all["Distance (km)"], errors='coerce').fillna(0.0)
+        if "Weight (kg)" not in df_all.columns: df_all["Weight (kg)"] = 0.0
+        else: df_all["Weight (kg)"] = pd.to_numeric(df_all["Weight (kg)"], errors='coerce')
+        df_all["Date"] = pd.to_datetime(df_all["Date"])
         
-        # Clean Data
-        df["Duration (min)"] = pd.to_numeric(df["Duration (min)"], errors='coerce').fillna(0)
-        df["Pain Level (0-10)"] = pd.to_numeric(df["Pain Level (0-10)"], errors='coerce').fillna(0)
-        df["Distance (km)"] = pd.to_numeric(df["Distance (km)"], errors='coerce').fillna(0.0)
-        if "Weight (kg)" not in df.columns: df["Weight (kg)"] = 0.0
-        else: df["Weight (kg)"] = pd.to_numeric(df["Weight (kg)"], errors='coerce')
-        df["Date"] = pd.to_datetime(df["Date"])
+        if "User" in df_all.columns:
+            df = df_all[df_all["User"] == username].copy()
+        else:
+            st.error("⚠️ Critical Error: Google Sheet missing 'User' column.")
+            df = pd.DataFrame()
 
 # --- LOAD GOALS ---
+# Default Defaults
 target_dist = 10.0
 target_pain = 2
 target_date = date(2026, 12, 31)
+target_activity = "Running" # Default activity
 
 if goal_sheet:
-    goal_data = goal_sheet.get_all_records()
-    if goal_data:
-        last_goal = goal_data[-1]
+    all_goals = goal_sheet.get_all_records()
+    user_goals = [g for g in all_goals if g.get("User") == username]
+    
+    if user_goals:
+        last_goal = user_goals[-1]
         target_dist = float(last_goal.get("Target Distance (km)", 10.0))
         target_pain = int(last_goal.get("Max Pain Level", 2))
+        target_activity = last_goal.get("Activity Type", "Running") # Load activity type
         try:
             target_date = datetime.strptime(last_goal.get("Target Date", "2026-12-31"), "%Y-%m-%d").date()
         except:
             pass
 
-# --- SIDEBAR ---
+# --- SIDEBAR: LOGGING ---
 with st.sidebar:
     st.header("📝 New Entry")
     log_type = st.radio("Log Type", ["Activity", "Pain Check-in", "Body Weight"])
@@ -96,18 +133,22 @@ with st.sidebar:
         weight_val = 0.0
         
         if log_type == "Activity":
-            activity_type = st.selectbox("Type", ["Running", "Cycling", "Weights", "Yoga", "Other"])
-            if activity_type in ["Running", "Cycling"]:
-                context = st.selectbox("Context", ["Outdoor", "Treadmill", "Track", "Trail"])
+            # UPDATED: Added "Walking" to the list
+            activity_type = st.selectbox("Type", ["Running", "Cycling", "Walking", "Weights", "Yoga", "Other"])
+            
+            # Logic for Distance inputs
+            if activity_type in ["Running", "Cycling", "Walking"]:
+                context = st.selectbox("Context", ["Outdoor", "Treadmill", "Track", "Trail", "Indoor"])
                 distance = st.number_input("Dist (km)", min_value=0.0, step=0.1)
             elif activity_type == "Weights":
                 context = "Gym/Weights"
+            
             duration = st.number_input("Mins", min_value=0, step=5)
             intensity = st.slider("Intensity (1-10)", 1, 10, 5)
             
         if log_type == "Pain Check-in":
             st.markdown("### 🩺 Symptom Check")
-            pain_loc = st.selectbox("Loc", ["Lower Back", "Knee", "Neck", "General"])
+            pain_loc = st.selectbox("Loc", ["Lower Back", "Knee", "Neck", "Abdominal", "General"])
             pain_level = st.slider("Pain (0-10)", 0, 10, 0)
             activity_type = "Symptom Log"
             
@@ -120,16 +161,16 @@ with st.sidebar:
         submitted = st.form_submit_button("Save Entry")
         
         if submitted and sheet:
-            new_row = [str(date_val), activity_type, context, distance, duration, intensity if log_type == "Activity" else "", pain_loc, pain_level if log_type == "Pain Check-in" else "", notes, weight_val if log_type == "Body Weight" else ""]
+            new_row = [username, str(date_val), activity_type, context, distance, duration, intensity if log_type == "Activity" else "", pain_loc, pain_level if log_type == "Pain Check-in" else "", notes, weight_val if log_type == "Body Weight" else ""]
             sheet.append_row(new_row)
             st.success("Saved!")
             st.rerun()
 
 # --- DASHBOARD ---
-st.title("📈 Pain Recovery Analyst")
+st.title(f"🛡️ BackTrack") 
 
 if df.empty:
-    st.info("Start by adding an entry in the sidebar.")
+    st.info(f"Welcome {name}! Start by adding an entry in the sidebar.")
 else:
     # 1. Daily Stats
     daily_stats = df.groupby(df["Date"].dt.date).agg({
@@ -140,34 +181,24 @@ else:
     }).reset_index()
     daily_stats["Date"] = pd.to_datetime(daily_stats["Date"])
 
-    # 2. ADVANCED LOGIC: The "48-Hour Safety Window"
-    # We need to know if a run caused pain TODAY, TOMORROW, or the NEXT DAY.
-    
-    # Create a simple lookup dictionary: { Date -> Max Pain that day }
+    # 2. Logic: Best "Activity" with Safety Window
     pain_map = daily_stats.set_index("Date")["Pain Level (0-10)"].to_dict()
+    valid_activities = []
     
-    # We will verify every run
-    valid_runs = []
+    # FILTER: Look for the specific activity type set in goals (e.g., only Cycling)
+    target_logs = df[(df["Activity Type"] == target_activity) & (df["Distance (km)"] > 0)].copy()
     
-    # Filter only running rows
-    running_logs = df[(df["Activity Type"] == "Running") & (df["Distance (km)"] > 0)].copy()
-    
-    for index, row in running_logs.iterrows():
+    for index, row in target_logs.iterrows():
         run_date = row["Date"]
         dist = row["Distance (km)"]
-        
-        # Check Day 0 (Run Day), Day 1 (Next Day), Day 2 (Day After)
-        # We use .get(date, 0) so if future dates don't exist yet, we assume 0 pain (benefit of doubt)
         p0 = pain_map.get(run_date, 0)
         p1 = pain_map.get(run_date + timedelta(days=1), 0)
         p2 = pain_map.get(run_date + timedelta(days=2), 0)
         
-        # The strict rule: ALL three days must be <= Target Pain
         if p0 <= target_pain and p1 <= target_pain and p2 <= target_pain:
-            valid_runs.append(dist)
+            valid_activities.append(dist)
             
-    # Get the best valid run
-    current_best_run = max(valid_runs) if valid_runs else 0.0
+    current_best = max(valid_activities) if valid_activities else 0.0
 
     # --- TABS ---
     tab1, tab2, tab3 = st.tabs(["📅 Daily Log", "🏆 Progress & Goals", "🤖 AI Analyst"])
@@ -180,36 +211,42 @@ else:
         fig.add_trace(go.Scatter(x=last_10["Date"], y=last_10["Pain Level (0-10)"], name="Pain", yaxis="y2", mode='lines+markers', line=dict(color='red', width=3)))
         fig.update_layout(yaxis=dict(title="Mins"), yaxis2=dict(title="Pain", overlaying="y", side="right", range=[0, 10]), legend=dict(orientation="h", y=1.1))
         st.plotly_chart(fig, use_container_width=True)
-        st.dataframe(df.sort_values("Date", ascending=False), use_container_width=True, hide_index=True)
+        
+        cols = [c for c in ["Date", "Activity Type", "Distance (km)", "Duration (min)", "Pain Level (0-10)", "Weight (kg)", "Notes"] if c in df.columns]
+        st.dataframe(df[cols].sort_values("Date", ascending=False), use_container_width=True, hide_index=True)
 
     with tab2:
         with st.expander("⚙️ Edit Goal Settings"):
             with st.form("goal_form"):
                 st.write("Set your main target:")
+                # UPDATED: Dropdown for Activity Type
+                new_activity = st.selectbox("Goal Activity", ["Running", "Cycling", "Walking"], index=["Running", "Cycling", "Walking"].index(target_activity) if target_activity in ["Running", "Cycling", "Walking"] else 0)
                 new_dist = st.number_input("Target Distance (km)", value=target_dist, step=0.5)
                 new_pain = st.number_input("Max Allowed Pain (0-10)", value=int(target_pain), min_value=0, max_value=10)
                 new_date = st.date_input("Target Date", value=target_date)
+                
                 if st.form_submit_button("Update Goal"):
                     if goal_sheet:
-                        goal_sheet.append_row([new_dist, new_pain, str(new_date)])
+                        # Save Goal WITH Activity Type
+                        goal_sheet.append_row([username, new_dist, new_pain, str(new_date), new_activity])
                         st.success("Updated! Refreshing...")
                         st.rerun()
 
         days_left = (target_date - date.today()).days
-        progress_pct = min(current_best_run / target_dist, 1.0)
+        progress_pct = min(current_best / target_dist, 1.0)
         
-        st.markdown(f"### 🎯 Goal: Run {target_dist}km (Pain ≤ {target_pain})")
+        st.markdown(f"### 🎯 Goal: {target_activity} {target_dist}km (Pain ≤ {target_pain})")
         
         c1, c2, c3 = st.columns([3, 1, 1])
         with c1:
             st.progress(progress_pct)
-            st.caption(f"Best Valid Run: **{current_best_run} km** (No pain spike for 48hrs after)")
+            st.caption(f"Best Valid {target_activity}: **{current_best} km** (No pain spike for 48hrs)")
         with c2: st.metric("Target", f"{target_dist} km")
         with c3: st.metric("Deadline", f"{days_left} Days")
         
-        if current_best_run >= target_dist:
+        if current_best >= target_dist:
             st.balloons()
-            st.success("🏆 GOAL ACHIEVED! You ran the distance without a delayed flare-up!")
+            st.success(f"🏆 GOAL ACHIEVED! You hit your {target_activity} target!")
             
         st.divider()
         st.subheader("📊 Weekly Volume")
@@ -225,22 +262,22 @@ else:
             st.warning("⚠️ Gemini API Key missing.")
         else:
             if st.button("Generate Insights"):
-                with st.spinner("Analyzing delayed responses..."):
+                with st.spinner(f"Analyzing {target_activity} data..."):
                     try:
                         recent_data = df.sort_values("Date").tail(30).to_csv(index=False)
                         prompt = f"""
-                        Act as an expert physiotherapist. Analyze logs (last 30 days) for a patient with DELAYED ONSET back pain.
+                        Act as an expert physiotherapist. Analyze logs (last 30 days) for User: {username}.
                         
-                        GOAL: Run {target_dist}km with Pain <= {target_pain} (Maintaining low pain for 48 hours post-run).
-                        CURRENT BEST: {current_best_run}km.
+                        GOAL: {target_activity} {target_dist}km with Pain <= {target_pain}.
+                        CURRENT BEST: {current_best}km.
                         
                         DATA:
                         {recent_data}
                         
                         TASK:
-                        1. Look for DELAYED patterns: Do runs cause pain spikes 1-2 days later?
+                        1. Look for DELAYED patterns: Do sessions cause pain spikes 1-2 days later?
                         2. Progress Check: Are they safely increasing distance?
-                        3. Recommendation: Specific plan for next week.
+                        3. Recommendation: Specific plan for next week to improve {target_activity}.
                         """
                         model = genai.GenerativeModel('gemini-flash-latest')
                         response = model.generate_content(prompt)
