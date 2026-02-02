@@ -7,7 +7,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import google.generativeai as genai
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="PhysioTracker", layout="wide")
+st.set_page_config(page_title="Pain Recovery Analyst", page_icon="📈", layout="wide")
 
 # --- CONNECT TO GOOGLE SHEETS ---
 def get_client():
@@ -126,7 +126,7 @@ with st.sidebar:
             st.rerun()
 
 # --- DASHBOARD ---
-st.title("🏃 PhysioTracker")
+st.title("📈 Pain Recovery Analyst")
 
 if df.empty:
     st.info("Start by adding an entry in the sidebar.")
