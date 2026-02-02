@@ -10,18 +10,29 @@ import streamlit_authenticator as stauth
 # --- CONFIGURATION ---
 st.set_page_config(page_title="BackTrack", page_icon="🛡️", layout="wide")
 
-# --- AUTHENTICATION SETUP ---
+# --- AUTHENTICATION SETUP (The Fix) ---
+# 1. Load lists from Secrets
 users = st.secrets["credentials"]["usernames"]
 names = st.secrets["credentials"]["names"]
 passwords = st.secrets["credentials"]["passwords"]
 
+# 2. Reformat into the dictionary structure the library requires
+credentials = {'usernames': {}}
+for i, user in enumerate(users):
+    credentials['usernames'][user] = {
+        'name': names[i],
+        'password': passwords[i]
+    }
+
+# 3. Create Authenticator
 authenticator = stauth.Authenticate(
-    dict(zip(users, zip(names, passwords))),
-    "backtrack_cookie",
-    "abcdef",
-    30
+    credentials,
+    "backtrack_cookie", # Cookie name
+    "abcdef",           # Random key
+    30                  # Expiry days
 )
 
+# 🛑 THE LOGIN GATE 🛑
 name, authentication_status, username = authenticator.login("Login", "main")
 
 if authentication_status == False:
@@ -57,7 +68,6 @@ def get_goal_sheet(client):
         try:
             return sh.worksheet("goals")
         except:
-            # UPDATED: Added "Activity Type" to headers
             ws = sh.add_worksheet(title="goals", rows=10, cols=6)
             ws.append_row(["User", "Target Distance (km)", "Max Pain Level", "Target Date", "Activity Type"]) 
             return ws
@@ -82,6 +92,7 @@ if sheet:
     df_all = pd.DataFrame(raw_data)
     
     if not df_all.empty:
+        # Standardize Columns
         df_all["Duration (min)"] = pd.to_numeric(df_all["Duration (min)"], errors='coerce').fillna(0)
         df_all["Pain Level (0-10)"] = pd.to_numeric(df_all["Pain Level (0-10)"], errors='coerce').fillna(0)
         df_all["Distance (km)"] = pd.to_numeric(df_all["Distance (km)"], errors='coerce').fillna(0.0)
@@ -89,6 +100,7 @@ if sheet:
         else: df_all["Weight (kg)"] = pd.to_numeric(df_all["Weight (kg)"], errors='coerce')
         df_all["Date"] = pd.to_datetime(df_all["Date"])
         
+        # Filter for current user
         if "User" in df_all.columns:
             df = df_all[df_all["User"] == username].copy()
         else:
@@ -96,11 +108,11 @@ if sheet:
             df = pd.DataFrame()
 
 # --- LOAD GOALS ---
-# Default Defaults
+# Defaults
 target_dist = 10.0
 target_pain = 2
 target_date = date(2026, 12, 31)
-target_activity = "Running" # Default activity
+target_activity = "Running"
 
 if goal_sheet:
     all_goals = goal_sheet.get_all_records()
@@ -110,7 +122,7 @@ if goal_sheet:
         last_goal = user_goals[-1]
         target_dist = float(last_goal.get("Target Distance (km)", 10.0))
         target_pain = int(last_goal.get("Max Pain Level", 2))
-        target_activity = last_goal.get("Activity Type", "Running") # Load activity type
+        target_activity = last_goal.get("Activity Type", "Running")
         try:
             target_date = datetime.strptime(last_goal.get("Target Date", "2026-12-31"), "%Y-%m-%d").date()
         except:
@@ -133,10 +145,8 @@ with st.sidebar:
         weight_val = 0.0
         
         if log_type == "Activity":
-            # UPDATED: Added "Walking" to the list
             activity_type = st.selectbox("Type", ["Running", "Cycling", "Walking", "Weights", "Yoga", "Other"])
             
-            # Logic for Distance inputs
             if activity_type in ["Running", "Cycling", "Walking"]:
                 context = st.selectbox("Context", ["Outdoor", "Treadmill", "Track", "Trail", "Indoor"])
                 distance = st.number_input("Dist (km)", min_value=0.0, step=0.1)
@@ -161,6 +171,7 @@ with st.sidebar:
         submitted = st.form_submit_button("Save Entry")
         
         if submitted and sheet:
+            # Save row with Username
             new_row = [username, str(date_val), activity_type, context, distance, duration, intensity if log_type == "Activity" else "", pain_loc, pain_level if log_type == "Pain Check-in" else "", notes, weight_val if log_type == "Body Weight" else ""]
             sheet.append_row(new_row)
             st.success("Saved!")
@@ -181,11 +192,11 @@ else:
     }).reset_index()
     daily_stats["Date"] = pd.to_datetime(daily_stats["Date"])
 
-    # 2. Logic: Best "Activity" with Safety Window
+    # 2. Logic: Best "Activity" with 48h Safety Window
     pain_map = daily_stats.set_index("Date")["Pain Level (0-10)"].to_dict()
     valid_activities = []
     
-    # FILTER: Look for the specific activity type set in goals (e.g., only Cycling)
+    # Filter logs matching the GOAL ACTIVITY
     target_logs = df[(df["Activity Type"] == target_activity) & (df["Distance (km)"] > 0)].copy()
     
     for index, row in target_logs.iterrows():
@@ -219,7 +230,7 @@ else:
         with st.expander("⚙️ Edit Goal Settings"):
             with st.form("goal_form"):
                 st.write("Set your main target:")
-                # UPDATED: Dropdown for Activity Type
+                # Activity Dropdown
                 new_activity = st.selectbox("Goal Activity", ["Running", "Cycling", "Walking"], index=["Running", "Cycling", "Walking"].index(target_activity) if target_activity in ["Running", "Cycling", "Walking"] else 0)
                 new_dist = st.number_input("Target Distance (km)", value=target_dist, step=0.5)
                 new_pain = st.number_input("Max Allowed Pain (0-10)", value=int(target_pain), min_value=0, max_value=10)
@@ -227,7 +238,6 @@ else:
                 
                 if st.form_submit_button("Update Goal"):
                     if goal_sheet:
-                        # Save Goal WITH Activity Type
                         goal_sheet.append_row([username, new_dist, new_pain, str(new_date), new_activity])
                         st.success("Updated! Refreshing...")
                         st.rerun()
