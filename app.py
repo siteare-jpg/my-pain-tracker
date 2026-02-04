@@ -5,7 +5,8 @@ from datetime import datetime, date, timedelta
 import google.generativeai as genai
 import firebase_admin
 from firebase_admin import credentials, firestore
-from streamlit_google_auth import Authenticate # New Library
+from streamlit_google_auth import Authenticate
+import json
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="BackTrack", page_icon="🛡️", layout="wide")
@@ -21,14 +22,28 @@ def get_db():
 
 db = get_db()
 
-# --- GOOGLE AUTHENTICATION SETUP ---
+# --- GOOGLE AUTHENTICATION SETUP (THE FIX) ---
+# 1. Create the credentials dictionary in the format Google expects
+client_config = {
+    "web": {
+        "client_id": st.secrets["google_auth"]["client_id"],
+        "client_secret": st.secrets["google_auth"]["client_secret"],
+        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "redirect_uris": [st.secrets["google_auth"]["redirect_uri"]]
+    }
+}
+
+# 2. Write this to a temporary file so the library can read it
+with open("google_credentials.json", "w") as f:
+    json.dump(client_config, f)
+
+# 3. Initialize the Authenticator using the file we just made
 authenticator = Authenticate(
-    secret_credentials_path=None, # We use st.secrets instead of a file
-    client_id=st.secrets["google_auth"]["client_id"],
-    client_secret=st.secrets["google_auth"]["client_secret"],
-    redirect_uri=st.secrets["google_auth"]["redirect_uri"],
+    secret_credentials_path="google_credentials.json",
     cookie_name="backtrack_google_cookie",
     cookie_key="random_signature_key",
+    redirect_uri=st.secrets["google_auth"]["redirect_uri"],
     cookie_expiry_days=30,
 )
 
@@ -41,9 +56,8 @@ if not st.session_state.get('connected'):
     st.stop()
 
 # --- USER IS LOGGED IN ---
-# We now use EMAIL as the unique identifier instead of a username
 user_info = st.session_state.get('user_info', {})
-username = user_info.get('email') # e.g., "jason@gmail.com"
+username = user_info.get('email') 
 name = user_info.get('name')
 picture = user_info.get('picture')
 
@@ -142,7 +156,7 @@ with st.sidebar:
             timestamp_str = combined_dt.strftime("%Y-%m-%d %H:%M:%S")
             
             log_data = {
-                "User": username, # SAVES EMAIL ADDRESS NOW
+                "User": username,
                 "Date": timestamp_str,
                 "Type": log_type,
                 "Activity": activity_type if log_type == "Activity" else "",
