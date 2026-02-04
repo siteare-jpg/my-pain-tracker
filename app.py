@@ -14,9 +14,7 @@ st.set_page_config(page_title="BackTrack", page_icon="🛡️", layout="wide")
 # We use a singleton function so we don't re-initialize the app every reload
 @st.cache_resource
 def get_db():
-    # Check if already initialized to avoid "App already exists" error
     if not firebase_admin._apps:
-        # Load credentials from Streamlit Secrets
         key_dict = dict(st.secrets["firebase"])
         cred = credentials.Certificate(key_dict)
         firebase_admin.initialize_app(cred)
@@ -86,24 +84,27 @@ if not df.empty:
     # We ensure they are datetime objects for pandas
     df["Date"] = pd.to_datetime(df["Date"]) 
 
-# --- LOAD GOALS FROM FIRESTORE ---
-# We store goals in a separate collection called 'goals'
+# --- LOAD GOALS FROM FIRESTORE (THE FIX) ---
 target_dist = 10.0
 target_pain = 2
 target_date = date(2026, 12, 31)
 target_activity = "Running"
 
-# Query the user's goal (Get the most recent one)
-goal_docs = db.collection('goals').where('User', '==', username).order_by('CreatedAt', direction=firestore.Query.DESCENDING).limit(1).stream()
+# 1. Query all goals for this user (simple query, no sorting)
+goal_docs = db.collection('goals').where('User', '==', username).stream()
 goal_list = [g.to_dict() for g in goal_docs]
 
+# 2. Sort them in Python to find the newest one
 if goal_list:
+    # Sort by 'CreatedAt' descending (newest first). 
+    # We use str() to ensure we can sort even if the timestamp format varies slightly.
+    goal_list.sort(key=lambda x: str(x.get('CreatedAt', '')), reverse=True)
+    
     last_goal = goal_list[0]
     target_dist = float(last_goal.get("TargetDist", 10.0))
     target_pain = int(last_goal.get("TargetPain", 2))
     target_activity = last_goal.get("TargetActivity", "Running")
     try:
-        # Convert string back to date object
         target_date = datetime.strptime(last_goal.get("TargetDate", "2026-12-31"), "%Y-%m-%d").date()
     except:
         pass
