@@ -3,15 +3,14 @@ import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, date, timedelta
 import google.generativeai as genai
-import streamlit_authenticator as stauth
 import firebase_admin
 from firebase_admin import credentials, firestore
+from streamlit_google_auth import Authenticate # New Library
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="BackTrack", page_icon="🛡️", layout="wide")
 
 # --- CONNECT TO FIRESTORE ---
-# We use a singleton function so we don't re-initialize the app every reload
 @st.cache_resource
 def get_db():
     if not firebase_admin._apps:
@@ -22,40 +21,39 @@ def get_db():
 
 db = get_db()
 
-# --- AUTHENTICATION SETUP ---
-users = st.secrets["credentials"]["usernames"]
-names = st.secrets["credentials"]["names"]
-passwords = st.secrets["credentials"]["passwords"]
-
-creds_dict = {'usernames': {}}
-for i, user in enumerate(users):
-    creds_dict['usernames'][user] = {
-        'name': names[i],
-        'password': passwords[i]
-    }
-
-authenticator = stauth.Authenticate(
-    creds_dict,
-    "backtrack_cookie", 
-    "abcdef",           
-    30                  
+# --- GOOGLE AUTHENTICATION SETUP ---
+authenticator = Authenticate(
+    secret_credentials_path=None, # We use st.secrets instead of a file
+    client_id=st.secrets["google_auth"]["client_id"],
+    client_secret=st.secrets["google_auth"]["client_secret"],
+    redirect_uri=st.secrets["google_auth"]["redirect_uri"],
+    cookie_name="backtrack_google_cookie",
+    cookie_key="random_signature_key",
+    cookie_expiry_days=30,
 )
 
-authenticator.login(location='main')
+# 🛑 THE LOGIN GATE 🛑
+authenticator.check_authentification()
+authenticator.login()
 
-if st.session_state['authentication_status'] is False:
-    st.error("Username/password is incorrect")
+if not st.session_state.get('connected'):
+    st.info("🔒 Please sign in with Google to access your logs.")
     st.stop()
-elif st.session_state['authentication_status'] is None:
-    st.warning("Please enter your username and password")
-    st.stop()
 
-name = st.session_state['name']
-username = st.session_state['username']
+# --- USER IS LOGGED IN ---
+# We now use EMAIL as the unique identifier instead of a username
+user_info = st.session_state.get('user_info', {})
+username = user_info.get('email') # e.g., "jason@gmail.com"
+name = user_info.get('name')
+picture = user_info.get('picture')
 
+# --- SIDEBAR LOGOUT ---
 with st.sidebar:
-    st.title(f"👤 {name}")
-    authenticator.logout(location='sidebar') 
+    if picture:
+        st.image(picture, width=50)
+    st.title(f"Hi, {name.split()[0]}!")
+    if st.button("Log out"):
+        authenticator.logout()
     st.divider()
 
 # --- GEMINI AI ---
@@ -66,40 +64,29 @@ except:
     ai_available = False
 
 # --- LOAD DATA FROM FIRESTORE ---
-# We query ONLY the logs that belong to this username
+# Query logs for this EMAIL address
 docs = db.collection('logs').where('User', '==', username).stream()
-
-# Convert Firestore documents to a list of dicts, then to DataFrame
 data_list = [doc.to_dict() for doc in docs]
 df = pd.DataFrame(data_list)
 
 if not df.empty:
-    # Standardize Columns
     df["Duration"] = pd.to_numeric(df["Duration"], errors='coerce').fillna(0)
     df["PainLevel"] = pd.to_numeric(df["PainLevel"], errors='coerce').fillna(0)
     df["Distance"] = pd.to_numeric(df["Distance"], errors='coerce').fillna(0.0)
     df["Weight"] = pd.to_numeric(df["Weight"], errors='coerce').fillna(0.0)
-    
-    # Firestore stores dates as specific objects, or strings depending on save
-    # We ensure they are datetime objects for pandas
     df["Date"] = pd.to_datetime(df["Date"]) 
 
-# --- LOAD GOALS FROM FIRESTORE (THE FIX) ---
+# --- LOAD GOALS ---
 target_dist = 10.0
 target_pain = 2
 target_date = date(2026, 12, 31)
 target_activity = "Running"
 
-# 1. Query all goals for this user (simple query, no sorting)
 goal_docs = db.collection('goals').where('User', '==', username).stream()
 goal_list = [g.to_dict() for g in goal_docs]
 
-# 2. Sort them in Python to find the newest one
 if goal_list:
-    # Sort by 'CreatedAt' descending (newest first). 
-    # We use str() to ensure we can sort even if the timestamp format varies slightly.
     goal_list.sort(key=lambda x: str(x.get('CreatedAt', '')), reverse=True)
-    
     last_goal = goal_list[0]
     target_dist = float(last_goal.get("TargetDist", 10.0))
     target_pain = int(last_goal.get("TargetPain", 2))
@@ -151,13 +138,11 @@ with st.sidebar:
         submitted = st.form_submit_button("Save Entry")
         
         if submitted:
-            # Create Timestamp String
             combined_dt = datetime.combine(date_val, time_val)
             timestamp_str = combined_dt.strftime("%Y-%m-%d %H:%M:%S")
             
-            # Construct Dictionary for Firestore
             log_data = {
-                "User": username,
+                "User": username, # SAVES EMAIL ADDRESS NOW
                 "Date": timestamp_str,
                 "Type": log_type,
                 "Activity": activity_type if log_type == "Activity" else "",
@@ -169,12 +154,10 @@ with st.sidebar:
                 "PainLevel": pain_level,
                 "Weight": weight_val,
                 "Notes": notes,
-                "CreatedAt": firestore.SERVER_TIMESTAMP # Helps with sorting later
+                "CreatedAt": firestore.SERVER_TIMESTAMP
             }
-            
-            # Save to 'logs' collection
             db.collection('logs').add(log_data)
-            st.success("Saved to Cloud Database!")
+            st.success("Saved!")
             st.rerun()
 
 # --- DASHBOARD ---
@@ -183,7 +166,6 @@ st.title(f"🛡️ BackTrack")
 if df.empty:
     st.info(f"Welcome {name}! Start by adding an entry in the sidebar.")
 else:
-    # 1. Daily Stats
     daily_stats = df.groupby(df["Date"].dt.date).agg({
         "Duration": "sum",
         "Distance": "sum",
@@ -192,11 +174,9 @@ else:
     }).reset_index()
     daily_stats["Date"] = pd.to_datetime(daily_stats["Date"])
 
-    # 2. Logic: Best Activity + Safety Window
     pain_map = daily_stats.set_index("Date")["PainLevel"].to_dict()
     valid_activities = []
     
-    # Filter matching logs
     target_logs = df[(df["Activity"] == target_activity) & (df["Distance"] > 0)].copy()
     
     for index, row in target_logs.iterrows():
@@ -211,11 +191,10 @@ else:
             
     current_best = max(valid_activities) if valid_activities else 0.0
 
-    # --- TABS ---
     tab1, tab2, tab3 = st.tabs(["📅 Daily Log", "🏆 Progress & Goals", "🤖 AI Analyst"])
 
     with tab1:
-        st.subheader("Last 10 Days Activity")
+        st.subheader("Last 10 Days")
         last_10 = daily_stats.sort_values("Date").tail(10)
         fig = go.Figure()
         fig.add_trace(go.Bar(x=last_10["Date"], y=last_10["Duration"], name="Mins", marker_color='rgb(55, 83, 109)'))
@@ -223,9 +202,7 @@ else:
         fig.update_layout(yaxis=dict(title="Mins"), yaxis2=dict(title="Pain", overlaying="y", side="right", range=[0, 10]), legend=dict(orientation="h", y=1.1))
         st.plotly_chart(fig, use_container_width=True)
         
-        # Display Dataframe
         display_cols = ["Date", "Activity", "Distance", "Duration", "PainLevel", "Weight", "Notes"]
-        # Only show cols that exist (in case of empty data)
         final_cols = [c for c in display_cols if c in df.columns]
         st.dataframe(df[final_cols].sort_values("Date", ascending=False), use_container_width=True, hide_index=True)
 
@@ -239,7 +216,6 @@ else:
                 new_date = st.date_input("Target Date", value=target_date)
                 
                 if st.form_submit_button("Update Goal"):
-                    # Save Goal to Firestore
                     goal_data = {
                         "User": username,
                         "TargetDist": new_dist,
@@ -254,27 +230,11 @@ else:
 
         days_left = (target_date - date.today()).days
         progress_pct = min(current_best / target_dist, 1.0)
-        
         st.markdown(f"### 🎯 Goal: {target_activity} {target_dist}km (Pain ≤ {target_pain})")
-        
-        c1, c2, c3 = st.columns([3, 1, 1])
-        with c1:
-            st.progress(progress_pct)
-            st.caption(f"Best Valid {target_activity}: **{current_best} km** (No pain spike for 48hrs)")
-        with c2: st.metric("Target", f"{target_dist} km")
-        with c3: st.metric("Deadline", f"{days_left} Days")
-        
+        st.progress(progress_pct)
         if current_best >= target_dist:
             st.balloons()
-            st.success(f"🏆 GOAL ACHIEVED! You hit your {target_activity} target!")
-            
-        st.divider()
-        st.subheader("📊 Weekly Volume")
-        weekly = daily_stats.set_index("Date").resample('W-MON').agg({"Duration": "sum", "Distance": "sum", "PainLevel": "mean", "Weight": "mean"}).reset_index()
-        fig_w = go.Figure()
-        fig_w.add_trace(go.Scatter(x=weekly["Date"], y=weekly["Distance"], fill='tozeroy', name='Vol (km)'))
-        fig_w.add_trace(go.Scatter(x=weekly["Date"], y=weekly["PainLevel"], mode='lines+markers', name='Avg Pain', line=dict(color='red', width=3)))
-        st.plotly_chart(fig_w, use_container_width=True)
+            st.success("🏆 GOAL ACHIEVED!")
 
     with tab3:
         st.subheader("🤖 Physio Intelligence")
@@ -284,23 +244,8 @@ else:
             if st.button("Generate Insights"):
                 with st.spinner(f"Analyzing {target_activity} data..."):
                     try:
-                        # Prepare data for AI
                         recent_data = df.sort_values("Date").tail(30).to_csv(index=False)
-                        
-                        prompt = f"""
-                        Act as an expert physiotherapist. Analyze logs (last 30 days) for User: {username}.
-                        
-                        GOAL: {target_activity} {target_dist}km with Pain <= {target_pain}.
-                        CURRENT BEST: {current_best}km.
-                        
-                        DATA:
-                        {recent_data}
-                        
-                        TASK:
-                        1. Look for DELAYED patterns: Do sessions cause pain spikes 1-2 days later?
-                        2. Progress Check: Are they safely increasing distance?
-                        3. Recommendation: Specific plan for next week to improve {target_activity}.
-                        """
+                        prompt = f"Act as an expert physiotherapist. Analyze logs (last 30 days) for User: {username}.\nGOAL: {target_activity} {target_dist}km with Pain <= {target_pain}.\nCURRENT BEST: {current_best}km.\nDATA:\n{recent_data}"
                         model = genai.GenerativeModel('gemini-flash-latest')
                         response = model.generate_content(prompt)
                         st.markdown(response.text)
