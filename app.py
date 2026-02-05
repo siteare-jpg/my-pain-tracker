@@ -265,3 +265,67 @@ else:
                         st.markdown(response.text)
                     except Exception as e:
                         st.error(f"AI Error: {e}")
+
+# --- 🚑 DATA RESCUE TOOL (Paste at the bottom of app.py) ---
+with st.sidebar:
+    st.divider()
+    st.header("🚑 Data Rescue")
+    st.info("Use this ONCE to move old data to your new Google Login.")
+    
+    # 1. Enter the EXACT username you used before (case sensitive!)
+    old_username_input = st.text_input("Old Username (e.g. simon)", value="")
+    
+    if st.button("Transfer My Data"):
+        if not old_username_input:
+            st.error("Please enter your old username first.")
+        else:
+            current_email = st.session_state.get('user_info', {}).get('email')
+            if not current_email:
+                st.error("You must be logged in with Google first.")
+            else:
+                progress_text = st.empty()
+                progress_text.write(f"Searching for data belonging to '{old_username_input}'...")
+                
+                # --- TRANSFER LOGS ---
+                logs_ref = db.collection('logs')
+                old_logs = logs_ref.where('User', '==', old_username_input).stream()
+                
+                count = 0
+                batch = db.batch()
+                
+                for doc in old_logs:
+                    # Update the 'User' field to be your new Email Address
+                    doc_ref = logs_ref.document(doc.id)
+                    batch.update(doc_ref, {'User': current_email})
+                    count += 1
+                    
+                    # Firestore batches are limited to 500, so we commit if it gets big
+                    if count % 400 == 0:
+                        batch.commit()
+                        batch = db.batch()
+                
+                if count > 0:
+                    batch.commit() # Commit any leftovers
+                    
+                # --- TRANSFER GOALS ---
+                goals_ref = db.collection('goals')
+                old_goals = goals_ref.where('User', '==', old_username_input).stream()
+                
+                g_count = 0
+                g_batch = db.batch()
+                
+                for g_doc in old_goals:
+                    g_ref = goals_ref.document(g_doc.id)
+                    g_batch.update(g_ref, {'User': current_email})
+                    g_count += 1
+                
+                if g_count > 0:
+                    g_batch.commit()
+                
+                # --- REPORT ---
+                if count == 0 and g_count == 0:
+                    st.warning(f"No data found for '{old_username_input}'. Check the spelling!")
+                else:
+                    st.balloons()
+                    st.success(f"✅ Success! Moved {count} logs and {g_count} goals to {current_email}.")
+                    st.write("Please refresh the page to see your graphs.")
