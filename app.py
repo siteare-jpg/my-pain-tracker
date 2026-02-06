@@ -1,17 +1,69 @@
 import streamlit as st
 import pandas as pd
-import plotly.graph_objects as go
-from datetime import datetime, date, timedelta
-import google.generativeai as genai
+import altair as alt
 import firebase_admin
 from firebase_admin import credentials, firestore
 from streamlit_google_auth import Authenticate
-import json
+import google.generativeai as genai
+from datetime import datetime
 
-# --- CONFIGURATION ---
-st.set_page_config(page_title="BackTrack", page_icon="🛡️", layout="wide")
+# --- PAGE CONFIG ---
+st.set_page_config(page_title="BackTrack Pain Tracker", page_icon="❤️", layout="wide")
 
-# --- CONNECT TO FIRESTORE ---
+# --- 1. SETUP & AUTHENTICATION ---
+# Ensure secrets exist
+if "google_auth" not in st.secrets:
+    st.error("Missing [google_auth] in secrets.toml")
+    st.stop()
+
+# Initialize the Authenticator
+authenticator = Authenticate(
+    secret_credentials_path=None,
+    cookie_name='google_auth_cookie',
+    cookie_key='random_secret_key',
+    redirect_uri=st.secrets["google_auth"]["redirect_uri"],
+    include_granted_scopes=True
+)
+
+# Check if we are already logged in
+authenticator.check_authentification()
+
+# 🛑 CUSTOM LOGIN BUTTON (Mobile Fix) 🛑
+# This replaces the standard login button to force "Same Tab" opening
+if not st.session_state.get('connected'):
+    st.title("Welcome to BackTrack")
+    st.write("Please sign in to track your recovery.")
+    
+    # Generate the Google Login URL manually
+    authorization_url = authenticator.get_authorization_url()
+    
+    # Custom HTML Button that forces target="_self" (Fixes mobile popup blocker)
+    st.markdown(f'''
+        <a href="{authorization_url}" target="_self" style="
+            display: inline-block;
+            background-color: #4285F4;
+            color: white;
+            padding: 12px 24px;
+            text-decoration: none;
+            border-radius: 4px;
+            font-family: sans-serif;
+            font-weight: 500;
+            border: 1px solid #4285F4;
+            margin-top: 20px;
+        ">
+            🔵 Sign in with Google
+        </a>
+    ''', unsafe_allow_html=True)
+    st.stop() # Stop here until logged in
+
+# If we get here, we are logged in!
+user_info = st.session_state.get('user_info', {})
+user_email = user_info.get('email', 'Unknown User')
+st.sidebar.write(f"Logged in as: **{user_email}**")
+if st.sidebar.button("Log out"):
+    authenticator.logout()
+
+# --- 2. FIREBASE CONNECTION ---
 @st.cache_resource
 def get_db():
     if not firebase_admin._apps:
@@ -22,247 +74,159 @@ def get_db():
 
 db = get_db()
 
-# --- GOOGLE AUTHENTICATION SETUP (THE FIX) ---
-# 1. Create the credentials dictionary in the format Google expects
-client_config = {
-    "web": {
-        "client_id": st.secrets["google_auth"]["client_id"],
-        "client_secret": st.secrets["google_auth"]["client_secret"],
-        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-        "token_uri": "https://oauth2.googleapis.com/token",
-        "redirect_uris": [st.secrets["google_auth"]["redirect_uri"]]
-    }
-}
+# --- 3. FETCH DATA ---
+# We fetch data upfront so we can use it for the "Smart Dropdown"
+logs_ref = db.collection('logs')
+docs = logs_ref.where('User', '==', user_email).stream()
 
-# 2. Write this to a temporary file so the library can read it
-with open("google_credentials.json", "w") as f:
-    json.dump(client_config, f)
+data = []
+for doc in docs:
+    d = doc.to_dict()
+    d['id'] = doc.id
+    data.append(d)
 
-# 3. Initialize the Authenticator using the file we just made
-authenticator = Authenticate(
-    secret_credentials_path="google_credentials.json",
-    cookie_name="backtrack_google_cookie",
-    cookie_key="random_signature_key",
-    redirect_uri=st.secrets["google_auth"]["redirect_uri"],
-    cookie_expiry_days=30,
-)
+df = pd.DataFrame(data)
 
-# 🛑 THE LOGIN GATE 🛑
-authenticator.check_authentification()
-authenticator.login()
-
-if not st.session_state.get('connected'):
-    st.info("🔒 Please sign in with Google to access your logs.")
-    st.stop()
-
-# --- USER IS LOGGED IN ---
-user_info = st.session_state.get('user_info', {})
-username = user_info.get('email') 
-name = user_info.get('name')
-picture = user_info.get('picture')
-
-# --- SIDEBAR LOGOUT ---
-with st.sidebar:
-    if picture:
-        st.image(picture, width=50)
-    st.title(f"Hi, {name.split()[0]}!")
-    if st.button("Log out"):
-        authenticator.logout()
-    st.divider()
-
-# --- GEMINI AI ---
-try:
-    genai.configure(api_key=st.secrets["gemini_api_key"])
-    ai_available = True
-except:
-    ai_available = False
-
-# --- LOAD DATA FROM FIRESTORE ---
-# Query logs for this EMAIL address
-docs = db.collection('logs').where('User', '==', username).stream()
-data_list = [doc.to_dict() for doc in docs]
-df = pd.DataFrame(data_list)
-
-if not df.empty:
-    df["Duration"] = pd.to_numeric(df["Duration"], errors='coerce').fillna(0)
-    df["PainLevel"] = pd.to_numeric(df["PainLevel"], errors='coerce').fillna(0)
-    df["Distance"] = pd.to_numeric(df["Distance"], errors='coerce').fillna(0.0)
-    df["Weight"] = pd.to_numeric(df["Weight"], errors='coerce').fillna(0.0)
-    df["Date"] = pd.to_datetime(df["Date"]) 
-
-# --- LOAD GOALS ---
-target_dist = 10.0
-target_pain = 2
-target_date = date(2026, 12, 31)
-target_activity = "Running"
-
-goal_docs = db.collection('goals').where('User', '==', username).stream()
-goal_list = [g.to_dict() for g in goal_docs]
-
-if goal_list:
-    goal_list.sort(key=lambda x: str(x.get('CreatedAt', '')), reverse=True)
-    last_goal = goal_list[0]
-    target_dist = float(last_goal.get("TargetDist", 10.0))
-    target_pain = int(last_goal.get("TargetPain", 2))
-    target_activity = last_goal.get("TargetActivity", "Running")
-    try:
-        target_date = datetime.strptime(last_goal.get("TargetDate", "2026-12-31"), "%Y-%m-%d").date()
-    except:
-        pass
-
-# --- SIDEBAR: LOGGING ---
+# --- 4. SIDEBAR INPUT ---
 with st.sidebar:
     st.header("📝 New Entry")
-    log_type = st.radio("Log Type", ["Activity", "Pain Check-in", "Body Weight"])
-    
-    with st.form("entry_form"):
-        c1, c2 = st.columns(2)
-        with c1: date_val = st.date_input("Date", datetime.today())
-        with c2: time_val = st.time_input("Time", datetime.now().time())
-            
-        activity_type = ""
-        context = ""
-        distance = 0.0
-        duration = 0
-        intensity = 0
-        pain_loc = ""
-        pain_level = 0
-        weight_val = 0.0
-        
-        if log_type == "Activity":
-            activity_type = st.selectbox("Type", ["Running", "Cycling", "Walking", "Weights", "Yoga", "Other"])
-            if activity_type in ["Running", "Cycling", "Walking"]:
-                context = st.selectbox("Context", ["Outdoor", "Treadmill", "Track", "Trail", "Indoor"])
-                distance = st.number_input("Dist (km)", min_value=0.0, step=0.1)
-            elif activity_type == "Weights":
-                context = "Gym/Weights"
-            duration = st.number_input("Mins", min_value=0, step=5)
-            intensity = st.slider("Intensity (1-10)", 1, 10, 5)
-            
-        if log_type == "Pain Check-in":
-            st.markdown("### 🩺 Symptom Check")
-            pain_loc = st.selectbox("Loc", ["Lower Back", "Knee", "Neck", "Abdominal", "General"])
-            pain_level = st.slider("Pain (0-10)", 0, 10, 0)
-            
-        if log_type == "Body Weight":
-            st.markdown("### ⚖️ Weight")
-            weight_val = st.number_input("Kg", min_value=0.0, step=0.1, format="%.1f")
+    log_type = st.radio("Type", ["Pain Check-in", "Activity"], horizontal=True)
 
-        notes = st.text_area("Notes")
-        submitted = st.form_submit_button("Save Entry")
+    if log_type == "Pain Check-in":
+        st.markdown("### 🩺 Symptom Check")
         
-        if submitted:
-            combined_dt = datetime.combine(date_val, time_val)
-            timestamp_str = combined_dt.strftime("%Y-%m-%d %H:%M:%S")
+        # --- SMART DROPDOWN LOGIC ---
+        # 1. Get history from the dataframe
+        history_locs = []
+        if not df.empty and "PainLoc" in df.columns:
+            # Clean list: remove blanks, duplicates, and sort
+            history_locs = sorted([x for x in df["PainLoc"].unique() if x and pd.notna(x)])
+        
+        # 2. Add the "Type new" option at the top
+        options = ["➕ Type a new one..."] + history_locs
+        
+        # 3. Show the dropdown
+        selected_option = st.selectbox("Location", options)
+        
+        # 4. Handle the custom input
+        if selected_option == "➕ Type a new one...":
+            pain_loc = st.text_input("Enter new location:", placeholder="e.g. Lower Back")
+        else:
+            pain_loc = selected_option # Use the selected history item
             
-            log_data = {
-                "User": username,
-                "Date": timestamp_str,
-                "Type": log_type,
-                "Activity": activity_type if log_type == "Activity" else "",
-                "Context": context,
-                "Distance": distance,
-                "Duration": duration,
-                "Intensity": intensity,
-                "PainLoc": pain_loc,
-                "PainLevel": pain_level,
-                "Weight": weight_val,
-                "Notes": notes,
-                "CreatedAt": firestore.SERVER_TIMESTAMP
-            }
-            db.collection('logs').add(log_data)
-            st.success("Saved!")
-            st.rerun()
+        pain_level = st.slider("Pain Level (0-10)", 0, 10, 0)
+        notes = st.text_area("Notes", height=80)
+        
+        if st.button("Save Pain Log", use_container_width=True):
+            if not pain_loc:
+                st.error("Please select or type a location.")
+            else:
+                new_log = {
+                    "User": user_email,
+                    "Type": "Pain",
+                    "PainLoc": pain_loc,
+                    "Level": pain_level,
+                    "Notes": notes,
+                    "Date": datetime.now()
+                }
+                db.collection("logs").add(new_log)
+                st.success("Saved!")
+                st.rerun()
 
-# --- DASHBOARD ---
-st.title(f"🛡️ BackTrack") 
+    elif log_type == "Activity":
+        st.markdown("### 🏃‍♂️ Activity Log")
+        
+        activity_name = st.text_input("Activity Name", placeholder="e.g. Physio, Walk")
+        duration = st.number_input("Duration (mins)", min_value=0, step=5)
+        notes = st.text_area("Notes", height=80)
+        
+        if st.button("Save Activity", use_container_width=True):
+            if not activity_name:
+                st.error("Please enter an activity name.")
+            else:
+                new_log = {
+                    "User": user_email,
+                    "Type": "Activity",
+                    "Activity": activity_name,
+                    "Duration": duration,
+                    "Notes": notes,
+                    "Date": datetime.now()
+                }
+                db.collection("logs").add(new_log)
+                st.success("Saved!")
+                st.rerun()
+
+# --- 5. MAIN DASHBOARD ---
+st.title("📊 Recovery Dashboard")
 
 if df.empty:
-    st.info(f"Welcome {name}! Start by adding an entry in the sidebar.")
+    st.info("No logs found. Use the sidebar to add your first entry!")
 else:
-    daily_stats = df.groupby(df["Date"].dt.date).agg({
-        "Duration": "sum",
-        "Distance": "sum",
-        "PainLevel": "max",
-        "Weight": "mean"
-    }).reset_index()
-    daily_stats["Date"] = pd.to_datetime(daily_stats["Date"])
-
-    pain_map = daily_stats.set_index("Date")["PainLevel"].to_dict()
-    valid_activities = []
+    # Cleanup Data
+    df['Date'] = pd.to_datetime(df['Date'])
+    df['DateStr'] = df['Date'].dt.strftime('%Y-%m-%d')
     
-    target_logs = df[(df["Activity"] == target_activity) & (df["Distance"] > 0)].copy()
+    # TABS
+    tab1, tab2, tab3 = st.tabs(["📉 Trends", "📋 History", "🤖 AI Analyst"])
     
-    for index, row in target_logs.iterrows():
-        run_date = row["Date"].date()
-        dist = row["Distance"]
-        p0 = pain_map.get(pd.Timestamp(run_date), 0)
-        p1 = pain_map.get(pd.Timestamp(run_date) + timedelta(days=1), 0)
-        p2 = pain_map.get(pd.Timestamp(run_date) + timedelta(days=2), 0)
-        
-        if p0 <= target_pain and p1 <= target_pain and p2 <= target_pain:
-            valid_activities.append(dist)
-            
-    current_best = max(valid_activities) if valid_activities else 0.0
-
-    tab1, tab2, tab3 = st.tabs(["📅 Daily Log", "🏆 Progress & Goals", "🤖 AI Analyst"])
-
     with tab1:
-        st.subheader("Last 10 Days")
-        last_10 = daily_stats.sort_values("Date").tail(10)
-        fig = go.Figure()
-        fig.add_trace(go.Bar(x=last_10["Date"], y=last_10["Duration"], name="Mins", marker_color='rgb(55, 83, 109)'))
-        fig.add_trace(go.Scatter(x=last_10["Date"], y=last_10["PainLevel"], name="Pain", yaxis="y2", mode='lines+markers', line=dict(color='red', width=3)))
-        fig.update_layout(yaxis=dict(title="Mins"), yaxis2=dict(title="Pain", overlaying="y", side="right", range=[0, 10]), legend=dict(orientation="h", y=1.1))
-        st.plotly_chart(fig, use_container_width=True)
+        st.subheader("Pain Over Time")
+        pain_df = df[df['Type'] == 'Pain'].sort_values('Date')
         
-        display_cols = ["Date", "Activity", "Distance", "Duration", "PainLevel", "Weight", "Notes"]
-        final_cols = [c for c in display_cols if c in df.columns]
-        st.dataframe(df[final_cols].sort_values("Date", ascending=False), use_container_width=True, hide_index=True)
+        if not pain_df.empty:
+            chart = alt.Chart(pain_df).mark_line(point=True).encode(
+                x='Date',
+                y='Level',
+                color='PainLoc',
+                tooltip=['DateStr', 'PainLoc', 'Level', 'Notes']
+            ).interactive()
+            st.altair_chart(chart, use_container_width=True)
+        else:
+            st.write("No pain logs yet.")
 
     with tab2:
-        with st.expander("⚙️ Edit Goal Settings"):
-            with st.form("goal_form"):
-                st.write("Set your main target:")
-                new_activity = st.selectbox("Goal Activity", ["Running", "Cycling", "Walking"], index=["Running", "Cycling", "Walking"].index(target_activity) if target_activity in ["Running", "Cycling", "Walking"] else 0)
-                new_dist = st.number_input("Target Distance (km)", value=target_dist, step=0.5)
-                new_pain = st.number_input("Max Allowed Pain (0-10)", value=int(target_pain), min_value=0, max_value=10)
-                new_date = st.date_input("Target Date", value=target_date)
-                
-                if st.form_submit_button("Update Goal"):
-                    goal_data = {
-                        "User": username,
-                        "TargetDist": new_dist,
-                        "TargetPain": new_pain,
-                        "TargetDate": str(new_date),
-                        "TargetActivity": new_activity,
-                        "CreatedAt": firestore.SERVER_TIMESTAMP
-                    }
-                    db.collection('goals').add(goal_data)
-                    st.success("Updated! Refreshing...")
-                    st.rerun()
-
-        days_left = (target_date - date.today()).days
-        progress_pct = min(current_best / target_dist, 1.0)
-        st.markdown(f"### 🎯 Goal: {target_activity} {target_dist}km (Pain ≤ {target_pain})")
-        st.progress(progress_pct)
-        if current_best >= target_dist:
-            st.balloons()
-            st.success("🏆 GOAL ACHIEVED!")
+        st.subheader("Recent Logs")
+        # Display the table, sorted by newest first
+        st.dataframe(
+            df[['DateStr', 'Type', 'PainLoc', 'Activity', 'Level', 'Notes']].sort_values('DateStr', ascending=False),
+            use_container_width=True
+        )
 
     with tab3:
-        st.subheader("🤖 Physio Intelligence")
-        if not ai_available:
-            st.warning("⚠️ Gemini API Key missing.")
+        st.subheader("🤖 AI Physiotherapist")
+        
+        # Check for Gemini Key (Must be at the TOP of secrets.toml)
+        if "gemini_api_key" not in st.secrets:
+            st.warning("⚠️ Gemini API Key missing. Please add 'gemini_api_key' to the top of your secrets.toml file.")
         else:
-            if st.button("Generate Insights"):
-                with st.spinner(f"Analyzing {target_activity} data..."):
+            # Configure Gemini
+            genai.configure(api_key=st.secrets["gemini_api_key"])
+            
+            if st.button("Analyze My Recovery"):
+                with st.spinner("Analyzing your data..."):
                     try:
-                        recent_data = df.sort_values("Date").tail(30).to_csv(index=False)
-                        prompt = f"Act as an expert physiotherapist. Analyze logs (last 30 days) for User: {username}.\nGOAL: {target_activity} {target_dist}km with Pain <= {target_pain}.\nCURRENT BEST: {current_best}km.\nDATA:\n{recent_data}"
-                        model = genai.GenerativeModel('gemini-flash-latest')
+                        # 1. Prepare Data for AI
+                        # Convert dataframe to CSV string for the AI to read
+                        csv_data = df.to_csv(index=False)
+                        
+                        # 2. The Prompt
+                        prompt = f"""
+                        Act as an expert Physiotherapist. 
+                        Here is my recovery data in CSV format:
+                        {csv_data}
+                        
+                        Please analyze this and tell me:
+                        1. What trends do you see in my pain levels?
+                        2. Is there a correlation between my activities and pain spikes?
+                        3. Give me 3 specific recommendations for next week.
+                        """
+                        
+                        # 3. Call AI
+                        model = genai.GenerativeModel('gemini-pro')
                         response = model.generate_content(prompt)
+                        
+                        # 4. Display
                         st.markdown(response.text)
+                        
                     except Exception as e:
                         st.error(f"AI Error: {e}")
-
