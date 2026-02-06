@@ -18,9 +18,18 @@ if "google_auth" not in st.secrets:
     st.error("Missing [google_auth] in secrets.toml")
     st.stop()
 
-# 🛠️ CREATE CREDENTIALS FILE FROM SECRETS 🛠️
+# 🛠️ FIX: BUILD ROBUST CREDENTIALS 🛠️
+# We explicitly add the standard Google URLs that are often missing from secrets.toml
 google_auth_secrets = dict(st.secrets["google_auth"])
 
+# Inject standard Google OAuth URIs if they are missing
+if "auth_uri" not in google_auth_secrets:
+    google_auth_secrets["auth_uri"] = "https://accounts.google.com/o/oauth2/auth"
+if "token_uri" not in google_auth_secrets:
+    google_auth_secrets["token_uri"] = "https://oauth2.googleapis.com/token"
+if "auth_provider_x509_cert_url" not in google_auth_secrets:
+    google_auth_secrets["auth_provider_x509_cert_url"] = "https://www.googleapis.com/oauth2/v1/certs"
+    
 # Create the dictionary structure the library expects
 credentials_dict = {"web": google_auth_secrets}
 
@@ -31,7 +40,7 @@ if os.path.exists("google_credentials.json"):
 with open("google_credentials.json", "w") as f:
     json.dump(credentials_dict, f)
 
-# Initialize the Authenticator (FIXED: Removed 'include_granted_scopes')
+# Initialize the Authenticator
 authenticator = Authenticate(
     secret_credentials_path="google_credentials.json", 
     cookie_name='google_auth_cookie',
@@ -214,12 +223,4 @@ else:
                         {csv_data}
                         
                         Please analyze this and tell me:
-                        1. What trends do you see in my pain levels?
-                        2. Is there a correlation between my activities and pain spikes?
-                        3. Give me 3 specific recommendations for next week.
-                        """
-                        model = genai.GenerativeModel('gemini-pro')
-                        response = model.generate_content(prompt)
-                        st.markdown(response.text)
-                    except Exception as e:
-                        st.error(f"AI Error: {e}")
+                        1. What trends do you
