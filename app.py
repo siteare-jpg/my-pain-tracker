@@ -223,4 +223,12 @@ else:
                         {csv_data}
                         
                         Please analyze this and tell me:
-                        1. What trends do you
+                        1. What trends do you see in my pain levels?
+                        2. Is there a correlation between my activities and pain spikes?
+                        3. Give me 3 specific recommendations for next week.
+                        """
+                        model = genai.GenerativeModel('gemini-pro')
+                        response = model.generate_content(prompt)
+                        st.markdown(response.text)
+                    except Exception as e:
+                        st.error(f"AI Error: {e}")
