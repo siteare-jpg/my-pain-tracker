@@ -6,6 +6,8 @@ from firebase_admin import credentials, firestore
 from streamlit_google_auth import Authenticate
 import google.generativeai as genai
 from datetime import datetime
+import json
+import os
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="BackTrack Pain Tracker", page_icon="❤️", layout="wide")
@@ -16,9 +18,21 @@ if "google_auth" not in st.secrets:
     st.error("Missing [google_auth] in secrets.toml")
     st.stop()
 
-# Initialize the Authenticator
+# 🛠️ FIX: CREATE CREDENTIALS FILE FROM SECRETS 🛠️
+# The library needs a physical file, so we create it from your secrets
+google_auth_secrets = dict(st.secrets["google_auth"])
+
+# Create the dictionary structure the library expects
+# (It expects a "web" or "installed" key at the top level)
+credentials_dict = {"web": google_auth_secrets}
+
+# Save to a temporary file
+with open("google_credentials.json", "w") as f:
+    json.dump(credentials_dict, f)
+
+# Initialize the Authenticator using the file we just created
 authenticator = Authenticate(
-    secret_credentials_path=None,
+    secret_credentials_path="google_credentials.json", 
     cookie_name='google_auth_cookie',
     cookie_key='random_secret_key',
     redirect_uri=st.secrets["google_auth"]["redirect_uri"],
@@ -187,10 +201,11 @@ else:
     with tab2:
         st.subheader("Recent Logs")
         # Display the table, sorted by newest first
-        st.dataframe(
-            df[['DateStr', 'Type', 'PainLoc', 'Activity', 'Level', 'Notes']].sort_values('DateStr', ascending=False),
-            use_container_width=True
-        )
+        if not df.empty:
+            st.dataframe(
+                df[['DateStr', 'Type', 'PainLoc', 'Activity', 'Level', 'Notes']].sort_values('DateStr', ascending=False),
+                use_container_width=True
+            )
 
     with tab3:
         st.subheader("🤖 AI Physiotherapist")
