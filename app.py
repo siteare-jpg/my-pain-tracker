@@ -18,32 +18,31 @@ if "google_auth" not in st.secrets:
     st.error("Missing [google_auth] in secrets.toml")
     st.stop()
 
-# 🛠️ FIX: CREATE CREDENTIALS FILE FROM SECRETS 🛠️
-# The library needs a physical file, so we create it from your secrets
+# 🛠️ CREATE CREDENTIALS FILE FROM SECRETS 🛠️
 google_auth_secrets = dict(st.secrets["google_auth"])
 
 # Create the dictionary structure the library expects
-# (It expects a "web" or "installed" key at the top level)
 credentials_dict = {"web": google_auth_secrets}
 
 # Save to a temporary file
+if os.path.exists("google_credentials.json"):
+    os.remove("google_credentials.json")
+
 with open("google_credentials.json", "w") as f:
     json.dump(credentials_dict, f)
 
-# Initialize the Authenticator using the file we just created
+# Initialize the Authenticator (FIXED: Removed 'include_granted_scopes')
 authenticator = Authenticate(
     secret_credentials_path="google_credentials.json", 
     cookie_name='google_auth_cookie',
     cookie_key='random_secret_key',
-    redirect_uri=st.secrets["google_auth"]["redirect_uri"],
-    include_granted_scopes=True
+    redirect_uri=st.secrets["google_auth"]["redirect_uri"]
 )
 
 # Check if we are already logged in
 authenticator.check_authentification()
 
 # 🛑 CUSTOM LOGIN BUTTON (Mobile Fix) 🛑
-# This replaces the standard login button to force "Same Tab" opening
 if not st.session_state.get('connected'):
     st.title("Welcome to BackTrack")
     st.write("Please sign in to track your recovery.")
@@ -51,7 +50,7 @@ if not st.session_state.get('connected'):
     # Generate the Google Login URL manually
     authorization_url = authenticator.get_authorization_url()
     
-    # Custom HTML Button that forces target="_self" (Fixes mobile popup blocker)
+    # Custom HTML Button that forces target="_self"
     st.markdown(f'''
         <a href="{authorization_url}" target="_self" style="
             display: inline-block;
@@ -68,7 +67,7 @@ if not st.session_state.get('connected'):
             🔵 Sign in with Google
         </a>
     ''', unsafe_allow_html=True)
-    st.stop() # Stop here until logged in
+    st.stop()
 
 # If we get here, we are logged in!
 user_info = st.session_state.get('user_info', {})
@@ -89,7 +88,6 @@ def get_db():
 db = get_db()
 
 # --- 3. FETCH DATA ---
-# We fetch data upfront so we can use it for the "Smart Dropdown"
 logs_ref = db.collection('logs')
 docs = logs_ref.where('User', '==', user_email).stream()
 
@@ -110,23 +108,17 @@ with st.sidebar:
         st.markdown("### 🩺 Symptom Check")
         
         # --- SMART DROPDOWN LOGIC ---
-        # 1. Get history from the dataframe
         history_locs = []
         if not df.empty and "PainLoc" in df.columns:
-            # Clean list: remove blanks, duplicates, and sort
             history_locs = sorted([x for x in df["PainLoc"].unique() if x and pd.notna(x)])
         
-        # 2. Add the "Type new" option at the top
         options = ["➕ Type a new one..."] + history_locs
-        
-        # 3. Show the dropdown
         selected_option = st.selectbox("Location", options)
         
-        # 4. Handle the custom input
         if selected_option == "➕ Type a new one...":
             pain_loc = st.text_input("Enter new location:", placeholder="e.g. Lower Back")
         else:
-            pain_loc = selected_option # Use the selected history item
+            pain_loc = selected_option
             
         pain_level = st.slider("Pain Level (0-10)", 0, 10, 0)
         notes = st.text_area("Notes", height=80)
@@ -176,11 +168,9 @@ st.title("📊 Recovery Dashboard")
 if df.empty:
     st.info("No logs found. Use the sidebar to add your first entry!")
 else:
-    # Cleanup Data
     df['Date'] = pd.to_datetime(df['Date'])
     df['DateStr'] = df['Date'].dt.strftime('%Y-%m-%d')
     
-    # TABS
     tab1, tab2, tab3 = st.tabs(["📉 Trends", "📋 History", "🤖 AI Analyst"])
     
     with tab1:
@@ -200,7 +190,6 @@ else:
 
     with tab2:
         st.subheader("Recent Logs")
-        # Display the table, sorted by newest first
         if not df.empty:
             st.dataframe(
                 df[['DateStr', 'Type', 'PainLoc', 'Activity', 'Level', 'Notes']].sort_values('DateStr', ascending=False),
@@ -210,21 +199,15 @@ else:
     with tab3:
         st.subheader("🤖 AI Physiotherapist")
         
-        # Check for Gemini Key (Must be at the TOP of secrets.toml)
         if "gemini_api_key" not in st.secrets:
             st.warning("⚠️ Gemini API Key missing. Please add 'gemini_api_key' to the top of your secrets.toml file.")
         else:
-            # Configure Gemini
             genai.configure(api_key=st.secrets["gemini_api_key"])
             
             if st.button("Analyze My Recovery"):
                 with st.spinner("Analyzing your data..."):
                     try:
-                        # 1. Prepare Data for AI
-                        # Convert dataframe to CSV string for the AI to read
                         csv_data = df.to_csv(index=False)
-                        
-                        # 2. The Prompt
                         prompt = f"""
                         Act as an expert Physiotherapist. 
                         Here is my recovery data in CSV format:
@@ -235,13 +218,8 @@ else:
                         2. Is there a correlation between my activities and pain spikes?
                         3. Give me 3 specific recommendations for next week.
                         """
-                        
-                        # 3. Call AI
                         model = genai.GenerativeModel('gemini-pro')
                         response = model.generate_content(prompt)
-                        
-                        # 4. Display
                         st.markdown(response.text)
-                        
                     except Exception as e:
                         st.error(f"AI Error: {e}")
