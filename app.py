@@ -7,6 +7,7 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 from streamlit_google_auth import Authenticate
 import json
+import os
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="BackTrack", page_icon="🛡️", layout="wide")
@@ -22,7 +23,7 @@ def get_db():
 
 db = get_db()
 
-# --- GOOGLE AUTHENTICATION SETUP (THE FIX) ---
+# --- GOOGLE AUTHENTICATION SETUP (YOUR WORKING FIX) ---
 # 1. Create the credentials dictionary in the format Google expects
 client_config = {
     "web": {
@@ -35,6 +36,9 @@ client_config = {
 }
 
 # 2. Write this to a temporary file so the library can read it
+if os.path.exists("google_credentials.json"):
+    os.remove("google_credentials.json")
+    
 with open("google_credentials.json", "w") as f:
     json.dump(client_config, f)
 
@@ -47,12 +51,32 @@ authenticator = Authenticate(
     cookie_expiry_days=30,
 )
 
-# 🛑 THE LOGIN GATE 🛑
+# 🛑 THE LOGIN GATE (With Mobile Fix) 🛑
 authenticator.check_authentification()
-authenticator.login()
 
 if not st.session_state.get('connected'):
-    st.info("🔒 Please sign in with Google to access your logs.")
+    # We use a custom button here to fix the "Long Press" issue on mobile
+    authorization_url = authenticator.get_authorization_url()
+    st.markdown(f'''
+        <div style="text-align: center; margin-top: 50px;">
+            <h1>Welcome to BackTrack 🛡️</h1>
+            <a href="{authorization_url}" target="_self" style="
+                display: inline-block;
+                background-color: #4285F4;
+                color: white;
+                padding: 12px 24px;
+                text-decoration: none;
+                border-radius: 4px;
+                font-family: sans-serif;
+                font-weight: 500;
+                border: 1px solid #4285F4;
+                font-size: 1.1rem;
+                margin-top: 20px;
+            ">
+                🔵 Sign in with Google
+            </a>
+        </div>
+    ''', unsafe_allow_html=True)
     st.stop()
 
 # --- USER IS LOGGED IN ---
@@ -78,7 +102,6 @@ except:
     ai_available = False
 
 # --- LOAD DATA FROM FIRESTORE ---
-# Query logs for this EMAIL address
 docs = db.collection('logs').where('User', '==', username).stream()
 data_list = [doc.to_dict() for doc in docs]
 df = pd.DataFrame(data_list)
@@ -141,7 +164,28 @@ with st.sidebar:
             
         if log_type == "Pain Check-in":
             st.markdown("### 🩺 Symptom Check")
-            pain_loc = st.selectbox("Loc", ["Lower Back", "Knee", "Neck", "Abdominal", "General"])
+            
+            # --- 🆕 SMART DROPDOWN FEATURE 🆕 ---
+            # 1. Get history from your data
+            history_locs = []
+            if not df.empty and "PainLoc" in df.columns:
+                history_locs = sorted([x for x in df["PainLoc"].unique() if x and pd.notna(x)])
+            
+            # 2. Add defaults if history is empty
+            if not history_locs:
+                history_locs = ["Lower Back", "Knee", "Neck", "Shoulder"]
+            
+            # 3. Add the "Add New" option at the top
+            options = ["➕ Type a new one..."] + history_locs
+            selected_option = st.selectbox("Loc", options)
+            
+            # 4. Handle input
+            if selected_option == "➕ Type a new one...":
+                pain_loc = st.text_input("Enter location:", placeholder="e.g. Shin Splints")
+            else:
+                pain_loc = selected_option
+            # ------------------------------------
+
             pain_level = st.slider("Pain (0-10)", 0, 10, 0)
             
         if log_type == "Body Weight":
@@ -152,27 +196,31 @@ with st.sidebar:
         submitted = st.form_submit_button("Save Entry")
         
         if submitted:
-            combined_dt = datetime.combine(date_val, time_val)
-            timestamp_str = combined_dt.strftime("%Y-%m-%d %H:%M:%S")
-            
-            log_data = {
-                "User": username,
-                "Date": timestamp_str,
-                "Type": log_type,
-                "Activity": activity_type if log_type == "Activity" else "",
-                "Context": context,
-                "Distance": distance,
-                "Duration": duration,
-                "Intensity": intensity,
-                "PainLoc": pain_loc,
-                "PainLevel": pain_level,
-                "Weight": weight_val,
-                "Notes": notes,
-                "CreatedAt": firestore.SERVER_TIMESTAMP
-            }
-            db.collection('logs').add(log_data)
-            st.success("Saved!")
-            st.rerun()
+            # Check if user forgot to type a custom location
+            if log_type == "Pain Check-in" and not pain_loc:
+                st.error("Please enter a location!")
+            else:
+                combined_dt = datetime.combine(date_val, time_val)
+                timestamp_str = combined_dt.strftime("%Y-%m-%d %H:%M:%S")
+                
+                log_data = {
+                    "User": username,
+                    "Date": timestamp_str,
+                    "Type": log_type,
+                    "Activity": activity_type if log_type == "Activity" else "",
+                    "Context": context,
+                    "Distance": distance,
+                    "Duration": duration,
+                    "Intensity": intensity,
+                    "PainLoc": pain_loc,
+                    "PainLevel": pain_level,
+                    "Weight": weight_val,
+                    "Notes": notes,
+                    "CreatedAt": firestore.SERVER_TIMESTAMP
+                }
+                db.collection('logs').add(log_data)
+                st.success("Saved!")
+                st.rerun()
 
 # --- DASHBOARD ---
 st.title(f"🛡️ BackTrack") 
