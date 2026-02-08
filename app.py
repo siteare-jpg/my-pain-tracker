@@ -23,8 +23,7 @@ def get_db():
 
 db = get_db()
 
-# --- GOOGLE AUTHENTICATION SETUP (YOUR WORKING FIX) ---
-# 1. Create the credentials dictionary in the format Google expects
+# --- GOOGLE AUTHENTICATION SETUP ---
 client_config = {
     "web": {
         "client_id": st.secrets["google_auth"]["client_id"],
@@ -35,14 +34,12 @@ client_config = {
     }
 }
 
-# 2. Write this to a temporary file so the library can read it
 if os.path.exists("google_credentials.json"):
     os.remove("google_credentials.json")
     
 with open("google_credentials.json", "w") as f:
     json.dump(client_config, f)
 
-# 3. Initialize the Authenticator using the file we just made
 authenticator = Authenticate(
     secret_credentials_path="google_credentials.json",
     cookie_name="backtrack_google_cookie",
@@ -51,11 +48,10 @@ authenticator = Authenticate(
     cookie_expiry_days=30,
 )
 
-# 🛑 THE LOGIN GATE (With Mobile Fix) 🛑
+# 🛑 LOGIN GATE (Mobile Fix) 🛑
 authenticator.check_authentification()
 
 if not st.session_state.get('connected'):
-    # We use a custom button here to fix the "Long Press" issue on mobile
     authorization_url = authenticator.get_authorization_url()
     st.markdown(f'''
         <div style="text-align: center; margin-top: 50px;">
@@ -85,7 +81,6 @@ username = user_info.get('email')
 name = user_info.get('name')
 picture = user_info.get('picture')
 
-# --- SIDEBAR LOGOUT ---
 with st.sidebar:
     if picture:
         st.image(picture, width=50)
@@ -101,9 +96,14 @@ try:
 except:
     ai_available = False
 
-# --- LOAD DATA FROM FIRESTORE ---
+# --- LOAD DATA ---
 docs = db.collection('logs').where('User', '==', username).stream()
-data_list = [doc.to_dict() for doc in docs]
+data_list = []
+for doc in docs:
+    d = doc.to_dict()
+    d['id'] = doc.id # Capture ID for edit/delete
+    data_list.append(d)
+
 df = pd.DataFrame(data_list)
 
 if not df.empty:
@@ -165,21 +165,17 @@ with st.sidebar:
         if log_type == "Pain Check-in":
             st.markdown("### 🩺 Symptom Check")
             
-            # --- 🆕 SMART DROPDOWN FEATURE 🆕 ---
-            # 1. Get history from your data
+            # --- SMART DROPDOWN (History + Add New) ---
             history_locs = []
             if not df.empty and "PainLoc" in df.columns:
                 history_locs = sorted([x for x in df["PainLoc"].unique() if x and pd.notna(x)])
             
-            # 2. Add defaults if history is empty
             if not history_locs:
                 history_locs = ["Lower Back", "Knee", "Neck", "Shoulder"]
             
-            # 3. Add the "Add New" option at the top
             options = ["➕ Type a new one..."] + history_locs
             selected_option = st.selectbox("Loc", options)
             
-            # 4. Handle input
             if selected_option == "➕ Type a new one...":
                 pain_loc = st.text_input("Enter location:", placeholder="e.g. Shin Splints")
             else:
@@ -196,7 +192,6 @@ with st.sidebar:
         submitted = st.form_submit_button("Save Entry")
         
         if submitted:
-            # Check if user forgot to type a custom location
             if log_type == "Pain Check-in" and not pain_loc:
                 st.error("Please enter a location!")
             else:
@@ -267,6 +262,60 @@ else:
         display_cols = ["Date", "Activity", "Distance", "Duration", "PainLevel", "Weight", "Notes"]
         final_cols = [c for c in display_cols if c in df.columns]
         st.dataframe(df[final_cols].sort_values("Date", ascending=False), use_container_width=True, hide_index=True)
+
+        # --- 📝 MANAGE DATA (EDIT / DELETE) ---
+        st.divider()
+        with st.expander("📝 Manage Data (Edit / Delete)"):
+            st.write("Select an entry to edit its notes or delete it.")
+            
+            # 1. Create Dropdown Options
+            delete_options = {}
+            for index, row in df.sort_values("Date", ascending=False).iterrows():
+                d_str = row['Date'].strftime('%Y-%m-%d %H:%M')
+                type_str = row.get('Type', 'Unknown')
+                detail_str = row.get('Activity') if row.get('Activity') else row.get('PainLoc', '')
+                label = f"{d_str} | {type_str} | {detail_str}"
+                delete_options[label] = row['id']
+            
+            selected_label = st.selectbox("Select entry:", list(delete_options.keys()))
+            
+            # 2. Show Edit Form if something selected
+            if selected_label:
+                doc_id = delete_options[selected_label]
+                # Get the actual row data
+                selected_row = df[df['id'] == doc_id].iloc[0]
+                
+                st.markdown(f"**Editing:** `{selected_label}`")
+                
+                # EDITABLE FIELDS
+                new_notes = st.text_area("Update Notes", value=selected_row.get('Notes', ''))
+                
+                c1, c2, c3 = st.columns(3)
+                with c1: 
+                    new_dist = st.number_input("Dist (km)", value=float(selected_row.get('Distance', 0.0)), step=0.1)
+                with c2: 
+                    new_pain = st.number_input("Pain Level", value=int(selected_row.get('PainLevel', 0)), min_value=0, max_value=10)
+                with c3:
+                    new_dur = st.number_input("Duration (min)", value=int(selected_row.get('Duration', 0)), step=5)
+
+                col_update, col_delete = st.columns([1, 4])
+                
+                with col_update:
+                    if st.button("💾 Update Entry"):
+                        db.collection('logs').document(doc_id).update({
+                            "Notes": new_notes,
+                            "Distance": new_dist,
+                            "PainLevel": new_pain,
+                            "Duration": new_dur
+                        })
+                        st.success("Updated!")
+                        st.rerun()
+                
+                with col_delete:
+                    if st.button("🗑️ Delete Permanently", type="primary"):
+                        db.collection('logs').document(doc_id).delete()
+                        st.success("Deleted!")
+                        st.rerun()
 
     with tab2:
         with st.expander("⚙️ Edit Goal Settings"):
