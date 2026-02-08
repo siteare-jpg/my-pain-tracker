@@ -40,12 +40,16 @@ if os.path.exists("google_credentials.json"):
 with open("google_credentials.json", "w") as f:
     json.dump(client_config, f)
 
+# 🛠️ LOGIN FIX: Use a stable key to prevent logouts
+# (If you add 'cookie_key' to your secrets later, it will use that. Otherwise, it uses this fixed string.)
+cookie_secret = st.secrets["google_auth"].get("cookie_key", "backtrack_stable_secret_key_fixed_2024")
+
 authenticator = Authenticate(
     secret_credentials_path="google_credentials.json",
     cookie_name="backtrack_google_cookie",
-    cookie_key="random_signature_key",
+    cookie_key=cookie_secret, 
     redirect_uri=st.secrets["google_auth"]["redirect_uri"],
-    cookie_expiry_days=30,
+    cookie_expiry_days=30, # Keeps you logged in for a month
 )
 
 # 🛑 LOGIN GATE (Mobile Fix) 🛑
@@ -259,6 +263,7 @@ else:
         fig.update_layout(yaxis=dict(title="Mins"), yaxis2=dict(title="Pain", overlaying="y", side="right", range=[0, 10]), legend=dict(orientation="h", y=1.1))
         st.plotly_chart(fig, use_container_width=True)
         
+        # --- TABLE VIEW ---
         display_cols = ["Date", "Activity", "Distance", "Duration", "PainLevel", "Weight", "Notes"]
         final_cols = [c for c in display_cols if c in df.columns]
         st.dataframe(df[final_cols].sort_values("Date", ascending=False), use_container_width=True, hide_index=True)
